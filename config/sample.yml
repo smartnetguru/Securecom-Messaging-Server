@@ -1,0 +1,88 @@
+twilio:
+  accountId: 
+  accountToken:
+  number:
+  localDomain: # The domain Twilio can call back to.
+  international: # Boolean specifying Twilio for international delivery
+
+# Optional. If specified, Nexmo will be used for non-US SMS and 
+# voice verification if twilio.international is false. Otherwise,
+# Nexmo, if specified, Nexmo will only be used as a fallback
+# for failed Twilio deliveries.
+nexmo:
+  apiKey:
+  apiSecret:
+  number:
+
+gcm:
+  senderId:
+  apiKey: 
+
+# Optional. Only if iOS clients are supported.
+apn:
+  enable: false
+  # In PEM format.
+  certificate: 
+  
+  # In PEM format.
+  key: 
+
+s3:
+  accessKey: 
+  accessSecret: 
+
+  # Name of the S3 bucket (needs to have been created)
+  # for attachments to go.  Should be configured with
+  # correct permissions.
+  attachmentsBucket:
+
+memcache:
+  servers: 
+  user: 
+  password: 
+
+redis:
+  url: 
+
+federation:
+  name:
+  peers: 
+    -
+      name: somepeer
+      url: https://foo.com
+      authenticationToken: foo
+      certificate: # In pem format 
+
+# Optional address of graphite server to report metrics
+graphite:
+  host:
+  port:
+
+database:
+  # the name of your JDBC driver
+  driverClass: org.postgresql.Driver
+
+  # the username
+  user: 
+
+  # the password
+  password: 
+
+  # the JDBC URL
+  url: jdbc:postgresql://somehost:somport/somedb
+
+  # any properties specific to your JDBC driver:
+  properties:
+    charSet: UTF-8
+ 
+smtp:
+  host: 
+  port: 
+  auth: 
+  user: 
+  password: 
+    
+bbpush:
+  url: 
+  user: 
+  password: 
