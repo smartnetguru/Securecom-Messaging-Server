@@ -18,112 +18,85 @@ package org.whispersystems.textsecuregcm.push;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.whispersystems.textsecuregcm.configuration.ApnConfiguration;
-import org.whispersystems.textsecuregcm.configuration.BBPushConfiguration;
-import org.whispersystems.textsecuregcm.configuration.GcmConfiguration;
 import org.whispersystems.textsecuregcm.entities.CryptoEncodingException;
 import org.whispersystems.textsecuregcm.entities.EncryptedOutgoingMessage;
 import org.whispersystems.textsecuregcm.entities.MessageProtos;
+import org.whispersystems.textsecuregcm.entities.PendingMessage;
 import org.whispersystems.textsecuregcm.storage.Account;
-import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.storage.PubSubManager;
-import org.whispersystems.textsecuregcm.storage.StoredMessages;
 
-import java.io.IOException;
-import java.security.KeyStoreException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.CertificateException;
+import org.whispersystems.textsecuregcm.configuration.ApnConfiguration;
+import org.whispersystems.textsecuregcm.configuration.BBPushConfiguration;
+import static org.whispersystems.textsecuregcm.entities.MessageProtos.OutgoingMessageSignal;
 
 public class PushSender {
 
   private final Logger logger = LoggerFactory.getLogger(PushSender.class);
 
-  private final AccountsManager accounts;
   private final GCMSender       gcmSender;
   private final APNSender       apnSender;
   private final WebsocketSender webSocketSender;
+  private final BBPushConfiguration bbPushConfiguration;
 
-  public PushSender(GcmConfiguration gcmConfiguration,
-                    ApnConfiguration apnConfiguration,
-                    BBPushConfiguration bbPushConfiguration,
-                    StoredMessages   storedMessages,
-                    PubSubManager    pubSubManager,
-                    AccountsManager  accounts)
-      throws CertificateException, NoSuchAlgorithmException, KeyStoreException, IOException
+  public PushSender(ApnConfiguration apnConfiguration,
+     	 	    BBPushConfiguration bbPushConfiguration,
+                    GCMSender gcmClient,
+                    APNSender apnSender,
+                    WebsocketSender websocketSender)
   {
-    this.accounts        = accounts;
-    this.webSocketSender = new WebsocketSender(storedMessages, pubSubManager);
-    this.gcmSender       = new GCMSender(gcmConfiguration.getApiKey(), bbPushConfiguration);
+    this.gcmSender       = gcmClient;
     if(apnConfiguration.getEnable().equalsIgnoreCase("true")){
-    	this.apnSender       = new APNSender(pubSubManager, storedMessages,
-                apnConfiguration.getCertificate(),
-                apnConfiguration.getKey());;
+    	this.apnSender       = apnSender;
     }else{
     	this.apnSender       = null;
     }
+    this.webSocketSender = websocketSender;
+    this.bbPushConfiguration = bbPushConfiguration;
   }
 
-  public void sendMessage(Account account, Device device, MessageProtos.OutgoingMessageSignal message)
+  public void sendMessage(Account account, Device device, OutgoingMessageSignal message)
       throws NotPushRegisteredException, TransientPushFailureException
   {
     try {
+      boolean                  isReceipt        = message.getType() == OutgoingMessageSignal.Type.RECEIPT_VALUE;
       String                   signalingKey     = device.getSignalingKey();
       EncryptedOutgoingMessage encryptedMessage = new EncryptedOutgoingMessage(message, signalingKey);
+      PendingMessage           pendingMessage   = new PendingMessage(message.getSource(),
+                                                                     message.getTimestamp(),
+                                                                     isReceipt,
+                                                                     encryptedMessage.serialize());
 
-      sendMessage(account, device, encryptedMessage);
+      sendMessage(account, device, pendingMessage);
     } catch (CryptoEncodingException e) {
       throw new NotPushRegisteredException(e);
     }
   }
 
-  public void sendMessage(Account account, Device device, EncryptedOutgoingMessage message)
+  public void sendMessage(Account account, Device device, PendingMessage pendingMessage)
       throws NotPushRegisteredException, TransientPushFailureException
   {
-    if      (device.getGcmId() != null)   sendGcmMessage(account, device, message);
-    else if (device.getApnId() != null)   sendApnMessage(account, device, message);
-    else if (device.getFetchesMessages()) sendWebSocketMessage(account, device, message);
+    if      (device.getGcmId() != null)   sendGcmMessage(account, device, pendingMessage);
+    else if (device.getApnId() != null)   sendApnMessage(account, device, pendingMessage);
+    else if (device.getFetchesMessages()) sendWebSocketMessage(account, device, pendingMessage);
     else                                  throw new NotPushRegisteredException("No delivery possible!");
   }
 
-  private void sendGcmMessage(Account account, Device device, EncryptedOutgoingMessage outgoingMessage)
-      throws NotPushRegisteredException, TransientPushFailureException
-  {
-    try {
-      String canonicalId = gcmSender.sendMessage(device.getGcmId(), outgoingMessage);
+  private void sendGcmMessage(Account account, Device device, PendingMessage pendingMessage) {
+    String number         = account.getNumber();
+    long   deviceId       = device.getId();
+    String registrationId = device.getGcmId();
 
-      if (canonicalId != null) {
-        device.setGcmId(canonicalId);
-        accounts.update(account);
-      }
-
-    } catch (NotPushRegisteredException e) {
-      logger.debug("No Such User", e);
-      device.setGcmId(null);
-      accounts.update(account);
-      throw new NotPushRegisteredException(e);
-    }
+    gcmSender.sendMessage(number, deviceId, registrationId, pendingMessage, bbPushConfiguration);
   }
 
-  private void sendApnMessage(Account account, Device device, EncryptedOutgoingMessage outgoingMessage)
-      throws TransientPushFailureException, NotPushRegisteredException
+  private void sendApnMessage(Account account, Device device, PendingMessage outgoingMessage)
+      throws TransientPushFailureException
   {
-    try {
-      apnSender.sendMessage(account, device, device.getApnId(), outgoingMessage);
-    } catch (NotPushRegisteredException e) {
-      device.setApnId(null);
-      accounts.update(account);
-      throw new NotPushRegisteredException(e);
-    }
+    apnSender.sendMessage(account, device, device.getApnId(), outgoingMessage);
   }
 
-  private void sendWebSocketMessage(Account account, Device device, EncryptedOutgoingMessage outgoingMessage)
-      throws NotPushRegisteredException
+  private void sendWebSocketMessage(Account account, Device device, PendingMessage outgoingMessage)
   {
-    try {
-      webSocketSender.sendMessage(account, device, outgoingMessage);
-    } catch (CryptoEncodingException e) {
-      throw new NotPushRegisteredException(e);
-    }
+    webSocketSender.sendMessage(account, device, outgoingMessage);
   }
 }

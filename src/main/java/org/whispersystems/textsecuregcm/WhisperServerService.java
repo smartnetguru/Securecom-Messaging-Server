@@ -38,6 +38,7 @@ import org.whispersystems.textsecuregcm.controllers.FederationControllerV2;
 import org.whispersystems.textsecuregcm.controllers.KeysControllerV1;
 import org.whispersystems.textsecuregcm.controllers.KeysControllerV2;
 import org.whispersystems.textsecuregcm.controllers.MessageController;
+import org.whispersystems.textsecuregcm.controllers.ReceiptController;
 import org.whispersystems.textsecuregcm.federation.FederatedClientManager;
 import org.whispersystems.textsecuregcm.federation.FederatedPeer;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
@@ -52,7 +53,10 @@ import org.whispersystems.textsecuregcm.providers.MemcacheHealthCheck;
 import org.whispersystems.textsecuregcm.providers.MemcachedClientFactory;
 import org.whispersystems.textsecuregcm.providers.RedisClientFactory;
 import org.whispersystems.textsecuregcm.providers.RedisHealthCheck;
+import org.whispersystems.textsecuregcm.push.APNSender;
+import org.whispersystems.textsecuregcm.push.GCMSender;
 import org.whispersystems.textsecuregcm.push.PushSender;
+import org.whispersystems.textsecuregcm.push.WebsocketSender;
 import org.whispersystems.textsecuregcm.sms.NexmoSmsSender;
 import org.whispersystems.textsecuregcm.sms.SmsSender;
 import org.whispersystems.textsecuregcm.sms.TwilioSmsSender;
@@ -137,6 +141,26 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
     StoredMessages         storedMessages         = new StoredMessages(redisClient);
     PubSubManager          pubSubManager          = new PubSubManager(redisClient);
 
+    APNSender apnSender = null;
+	
+    if(config.getApnConfiguration().getEnable().equalsIgnoreCase("true")){
+    	
+      apnSender = new APNSender(accountsManager, pubSubManager, storedMessages, memcachedClient,
+                                        config.getApnConfiguration().getCertificate(),
+                                        config.getApnConfiguration().getKey());
+    }
+
+    GCMSender gcmSender = new GCMSender(accountsManager,
+                                        config.getGcmConfiguration().getSenderId(),
+                                        config.getGcmConfiguration().getApiKey());
+
+    WebsocketSender websocketSender = new WebsocketSender(storedMessages, pubSubManager);
+
+    if(apnSender != null){
+    	environment.lifecycle().manage(apnSender);
+    }
+    environment.lifecycle().manage(gcmSender);
+
     AccountAuthenticator     deviceAuthenticator    = new AccountAuthenticator(accountsManager);
     RateLimiters             rateLimiters           = new RateLimiters(config.getLimitsConfiguration(), memcachedClient);
 
@@ -144,11 +168,7 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
     Optional<NexmoSmsSender> nexmoSmsSender         = initializeNexmoSmsSender(config.getNexmoConfiguration());
     SmsSender                smsSender              = new SmsSender(twilioSmsSender, nexmoSmsSender, config.getTwilioConfiguration().isInternational());
     UrlSigner                urlSigner              = new UrlSigner(config.getS3Configuration());
-    PushSender               pushSender             = new PushSender(config.getGcmConfiguration(),
-                                                                     config.getApnConfiguration(),
-                                                                     config.getBBPushConfiguration(),
-                                                                     storedMessages, pubSubManager,
-                                                                     accountsManager);
+    PushSender               pushSender             = new PushSender(config.getApnConfiguration(), config.getBBPushConfiguration(), gcmSender, apnSender, websocketSender);
 
     AttachmentController attachmentController = new AttachmentController(rateLimiters, federatedClientManager, urlSigner);
     KeysControllerV1     keysControllerV1     = new KeysControllerV1(rateLimiters, keys, accountsManager, federatedClientManager);
@@ -160,11 +180,12 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
                                                                deviceAuthenticator,
                                                                Device.class, "WhisperServer"));
 
-    environment.jersey().register(new AccountController(pendingAccountsManager, accountsManager, rateLimiters, smsSender, config.getSmtpConfiguration()));
+    environment.jersey().register(new AccountController(pendingAccountsManager, accountsManager, rateLimiters, smsSender, config.getSmtpConfiguration(), storedMessages));
     environment.jersey().register(new DeviceController(pendingDevicesManager, accountsManager, rateLimiters));
     environment.jersey().register(new DirectoryController(rateLimiters, directory));
     environment.jersey().register(new FederationControllerV1(accountsManager, attachmentController, messageController, keysControllerV1));
     environment.jersey().register(new FederationControllerV2(accountsManager, attachmentController, messageController, keysControllerV2));
+    environment.jersey().register(new ReceiptController(accountsManager, federatedClientManager, pushSender));
     environment.jersey().register(attachmentController);
     environment.jersey().register(keysControllerV1);
     environment.jersey().register(keysControllerV2);
@@ -172,6 +193,7 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
 
     if (config.getWebsocketConfiguration().isEnabled()) {
       WebsocketControllerFactory servlet = new WebsocketControllerFactory(deviceAuthenticator,
+                                                                          accountsManager,
                                                                           pushSender,
                                                                           storedMessages,
                                                                           pubSubManager);

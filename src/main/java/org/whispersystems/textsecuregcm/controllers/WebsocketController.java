@@ -10,17 +10,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.auth.AccountAuthenticator;
 import org.whispersystems.textsecuregcm.entities.AcknowledgeWebsocketMessage;
-import org.whispersystems.textsecuregcm.entities.EncryptedOutgoingMessage;
 import org.whispersystems.textsecuregcm.entities.IncomingWebsocketMessage;
+import org.whispersystems.textsecuregcm.entities.PendingMessage;
 import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
 import org.whispersystems.textsecuregcm.push.PushSender;
 import org.whispersystems.textsecuregcm.push.TransientPushFailureException;
 import org.whispersystems.textsecuregcm.storage.Account;
+import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.storage.PubSubListener;
 import org.whispersystems.textsecuregcm.storage.PubSubManager;
 import org.whispersystems.textsecuregcm.storage.PubSubMessage;
 import org.whispersystems.textsecuregcm.storage.StoredMessages;
+import org.whispersystems.textsecuregcm.util.SystemMapper;
 import org.whispersystems.textsecuregcm.websocket.WebsocketAddress;
 import org.whispersystems.textsecuregcm.websocket.WebsocketMessage;
 
@@ -33,14 +35,16 @@ import java.util.Map;
 
 import io.dropwizard.auth.AuthenticationException;
 import io.dropwizard.auth.basic.BasicCredentials;
+import static org.whispersystems.textsecuregcm.entities.MessageProtos.OutgoingMessageSignal;
 
 public class WebsocketController implements WebSocketListener, PubSubListener {
 
-  private static final Logger            logger          = LoggerFactory.getLogger(WebsocketController.class);
-  private static final ObjectMapper      mapper          = new ObjectMapper();
-  private static final Map<Long, String> pendingMessages = new HashMap<>();
+  private static final Logger                    logger          = LoggerFactory.getLogger(WebsocketController.class);
+  private static final ObjectMapper              mapper          = SystemMapper.getMapper();
+  private static final Map<Long, PendingMessage> pendingMessages = new HashMap<>();
 
   private final AccountAuthenticator accountAuthenticator;
+  private final AccountsManager      accountsManager;
   private final PubSubManager        pubSubManager;
   private final StoredMessages       storedMessages;
   private final PushSender           pushSender;
@@ -53,16 +57,17 @@ public class WebsocketController implements WebSocketListener, PubSubListener {
   private long pendingMessageSequence;
 
   public WebsocketController(AccountAuthenticator accountAuthenticator,
+                             AccountsManager      accountsManager,
                              PushSender           pushSender,
                              PubSubManager        pubSubManager,
                              StoredMessages       storedMessages)
   {
     this.accountAuthenticator = accountAuthenticator;
+    this.accountsManager      = accountsManager;
     this.pushSender           = pushSender;
     this.pubSubManager        = pubSubManager;
     this.storedMessages       = storedMessages;
   }
-
 
   @Override
   public void onWebSocketConnect(Session session) {
@@ -89,7 +94,7 @@ public class WebsocketController implements WebSocketListener, PubSubListener {
 
       this.account = account.get();
       this.device  = account.get().getAuthenticatedDevice().get();
-      this.address = new WebsocketAddress(this.account.getId(), this.device.getId());
+      this.address = new WebsocketAddress(this.account.getNumber(), this.device.getId());
       this.session = session;
 
       this.session.setIdleTimeout(10 * 60 * 1000);
@@ -125,7 +130,7 @@ public class WebsocketController implements WebSocketListener, PubSubListener {
   public void onWebSocketClose(int i, String s) {
     pubSubManager.unsubscribe(this.address, this);
 
-    List<String> remainingMessages = new LinkedList<>();
+    List<PendingMessage> remainingMessages = new LinkedList<>();
 
     synchronized (pendingMessages) {
       Long[] pendingKeys = pendingMessages.keySet().toArray(new Long[0]);
@@ -138,12 +143,12 @@ public class WebsocketController implements WebSocketListener, PubSubListener {
       pendingMessages.clear();
     }
 
-    for (String remainingMessage : remainingMessages) {
+    for (PendingMessage remainingMessage : remainingMessages) {
       try {
-        pushSender.sendMessage(account, device, new EncryptedOutgoingMessage(remainingMessage));
+        pushSender.sendMessage(account, device, remainingMessage);
       } catch (NotPushRegisteredException | TransientPushFailureException e) {
         logger.warn("onWebSocketClose", e);
-        storedMessages.insert(account.getId(), device.getId(), remainingMessage);
+        storedMessages.insert(address, remainingMessage);
       }
     }
   }
@@ -152,7 +157,12 @@ public class WebsocketController implements WebSocketListener, PubSubListener {
   public void onPubSubMessage(PubSubMessage outgoingMessage) {
     switch (outgoingMessage.getType()) {
       case PubSubMessage.TYPE_DELIVER:
-        handleDeliverOutgoingMessage(outgoingMessage.getContents());
+        try {
+          PendingMessage pendingMessage = mapper.readValue(outgoingMessage.getContents(), PendingMessage.class);
+          handleDeliverOutgoingMessage(pendingMessage);
+        } catch (IOException e) {
+          logger.warn("WebsocketController", "Error deserializing PendingMessage", e);
+        }
         break;
       case PubSubMessage.TYPE_QUERY_DB:
         handleQueryDatabase();
@@ -162,7 +172,7 @@ public class WebsocketController implements WebSocketListener, PubSubListener {
     }
   }
 
-  private void handleDeliverOutgoingMessage(String message) {
+  private void handleDeliverOutgoingMessage(PendingMessage message) {
     try {
       long messageSequence;
 
@@ -171,7 +181,7 @@ public class WebsocketController implements WebSocketListener, PubSubListener {
         pendingMessages.put(messageSequence, message);
       }
 
-      WebsocketMessage websocketMessage = new WebsocketMessage(messageSequence, message);
+      WebsocketMessage websocketMessage = new WebsocketMessage(messageSequence, message.getEncryptedOutgoingMessage());
       session.getRemote().sendStringByFuture(mapper.writeValueAsString(websocketMessage));
     } catch (IOException e) {
       logger.debug("Response failed", e);
@@ -182,20 +192,50 @@ public class WebsocketController implements WebSocketListener, PubSubListener {
   private void handleMessageAck(String message) {
     try {
       AcknowledgeWebsocketMessage ack = mapper.readValue(message, AcknowledgeWebsocketMessage.class);
+      PendingMessage acknowledgedMessage;
 
       synchronized (pendingMessages) {
-        pendingMessages.remove(ack.getId());
+        acknowledgedMessage = pendingMessages.remove(ack.getId());
       }
+
+      if (acknowledgedMessage != null && !acknowledgedMessage.isReceipt()) {
+        sendDeliveryReceipt(acknowledgedMessage);
+      }
+
     } catch (IOException e) {
       logger.warn("Mapping", e);
     }
   }
 
   private void handleQueryDatabase() {
-    List<String> messages = storedMessages.getMessagesForDevice(account.getId(), device.getId());
+    List<PendingMessage> messages = storedMessages.getMessagesForDevice(address);
 
-    for (String message : messages) {
+    for (PendingMessage message : messages) {
       handleDeliverOutgoingMessage(message);
+    }
+  }
+
+  private void sendDeliveryReceipt(PendingMessage acknowledgedMessage) {
+    try {
+      Optional<Account> source = accountsManager.get(acknowledgedMessage.getSender());
+
+      if (!source.isPresent()) {
+        logger.warn("Source account disappeared? (%s)", acknowledgedMessage.getSender());
+        return;
+      }
+
+      OutgoingMessageSignal.Builder receipt =
+          OutgoingMessageSignal.newBuilder()
+                               .setSource(account.getNumber())
+                               .setSourceDevice((int) device.getId())
+                               .setTimestamp(acknowledgedMessage.getMessageId())
+                               .setType(OutgoingMessageSignal.Type.RECEIPT_VALUE);
+
+      for (Device device : source.get().getDevices()) {
+        pushSender.sendMessage(source.get(), device, receipt.build());
+      }
+    } catch (NotPushRegisteredException | TransientPushFailureException e) {
+      logger.warn("Websocket", "Delivery receipet", e);
     }
   }
 
@@ -220,5 +260,4 @@ public class WebsocketController implements WebSocketListener, PubSubListener {
       logger.info("close()", e);
     }
   }
-
 }

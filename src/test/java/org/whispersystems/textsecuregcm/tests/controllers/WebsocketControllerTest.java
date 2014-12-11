@@ -11,8 +11,11 @@ import org.whispersystems.textsecuregcm.auth.AccountAuthenticator;
 import org.whispersystems.textsecuregcm.controllers.WebsocketController;
 import org.whispersystems.textsecuregcm.entities.AcknowledgeWebsocketMessage;
 import org.whispersystems.textsecuregcm.entities.EncryptedOutgoingMessage;
+import org.whispersystems.textsecuregcm.entities.MessageProtos;
+import org.whispersystems.textsecuregcm.entities.PendingMessage;
 import org.whispersystems.textsecuregcm.push.PushSender;
 import org.whispersystems.textsecuregcm.storage.Account;
+import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.storage.PubSubManager;
 import org.whispersystems.textsecuregcm.storage.StoredMessages;
@@ -39,6 +42,7 @@ public class WebsocketControllerTest {
 
   private static final StoredMessages       storedMessages       = mock(StoredMessages.class);
   private static final AccountAuthenticator accountAuthenticator = mock(AccountAuthenticator.class);
+  private static final AccountsManager      accountsManager      = mock(AccountsManager.class);
   private static final PubSubManager        pubSubManager        = mock(PubSubManager.class       );
   private static final Account              account              = mock(Account.class             );
   private static final Device               device               = mock(Device.class              );
@@ -56,7 +60,7 @@ public class WebsocketControllerTest {
 
     when(session.getUpgradeRequest()).thenReturn(upgradeRequest);
 
-    WebsocketController controller = new WebsocketController(accountAuthenticator, pushSender, pubSubManager, storedMessages);
+    WebsocketController controller = new WebsocketController(accountAuthenticator, accountsManager, pushSender, pubSubManager, storedMessages);
 
     when(upgradeRequest.getParameterMap()).thenReturn(new HashMap<String, String[]>() {{
       put("login", new String[] {VALID_USER});
@@ -83,17 +87,29 @@ public class WebsocketControllerTest {
   public void testOpen() throws Exception {
     RemoteEndpoint remote = mock(RemoteEndpoint.class);
 
-    List<String> outgoingMessages = new LinkedList<String>() {{
-      add("first");
-      add("second");
-      add("third");
+    List<PendingMessage> outgoingMessages = new LinkedList<PendingMessage>() {{
+      add(new PendingMessage("sender1", 1111, false, "first"));
+      add(new PendingMessage("sender1", 2222, false, "second"));
+      add(new PendingMessage("sender2", 3333, false, "third"));
     }};
 
     when(device.getId()).thenReturn(2L);
-    when(account.getId()).thenReturn(31337L);
     when(account.getAuthenticatedDevice()).thenReturn(Optional.of(device));
+    when(account.getNumber()).thenReturn("+14152222222");
     when(session.getRemote()).thenReturn(remote);
     when(session.getUpgradeRequest()).thenReturn(upgradeRequest);
+
+    final Device sender1device = mock(Device.class);
+
+    List<Device> sender1devices = new LinkedList<Device>() {{
+      add(sender1device);
+    }};
+
+    Account sender1 = mock(Account.class);
+    when(sender1.getDevices()).thenReturn(sender1devices);
+
+    when(accountsManager.get("sender1")).thenReturn(Optional.of(sender1));
+    when(accountsManager.get("sender2")).thenReturn(Optional.<Account>absent());
 
     when(upgradeRequest.getParameterMap()).thenReturn(new HashMap<String, String[]>() {{
       put("login", new String[] {VALID_USER});
@@ -103,25 +119,27 @@ public class WebsocketControllerTest {
     when(accountAuthenticator.authenticate(eq(new BasicCredentials(VALID_USER, VALID_PASSWORD))))
         .thenReturn(Optional.of(account));
 
-    when(storedMessages.getMessagesForDevice(account.getId(), device.getId())).thenReturn(outgoingMessages);
+    when(storedMessages.getMessagesForDevice(new WebsocketAddress(account.getNumber(), device.getId())))
+        .thenReturn(outgoingMessages);
 
-    WebsocketControllerFactory factory    = new WebsocketControllerFactory(accountAuthenticator, pushSender, storedMessages, pubSubManager);
+    WebsocketControllerFactory factory    = new WebsocketControllerFactory(accountAuthenticator, accountsManager, pushSender, storedMessages, pubSubManager);
     WebsocketController        controller = (WebsocketController) factory.createWebSocket(null, null);
 
     controller.onWebSocketConnect(session);
 
-    verify(pubSubManager).subscribe(eq(new WebsocketAddress(31337L, 2L)), eq((controller)));
+    verify(pubSubManager).subscribe(eq(new WebsocketAddress("+14152222222", 2L)), eq((controller)));
     verify(remote, times(3)).sendStringByFuture(anyString());
 
     controller.onWebSocketText(mapper.writeValueAsString(new AcknowledgeWebsocketMessage(1)));
     controller.onWebSocketClose(1000, "Closed");
 
-    List<String> pending = new LinkedList<String>() {{
-      add("first");
-      add("third");
+    List<PendingMessage> pending = new LinkedList<PendingMessage>() {{
+      add(new PendingMessage("sender1", 1111, false, "first"));
+      add(new PendingMessage("sender2", 3333, false, "third"));
     }};
 
-    verify(pushSender, times(2)).sendMessage(eq(account), eq(device), any(EncryptedOutgoingMessage.class));
+    verify(pushSender, times(2)).sendMessage(eq(account), eq(device), any(PendingMessage.class));
+    verify(pushSender, times(1)).sendMessage(eq(sender1), eq(sender1device), any(MessageProtos.OutgoingMessageSignal.class));
   }
 
 }

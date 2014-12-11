@@ -13,6 +13,7 @@ import org.whispersystems.textsecuregcm.sms.SmsSender;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.PendingAccountsManager;
+import org.whispersystems.textsecuregcm.storage.StoredMessages;
 import org.whispersystems.textsecuregcm.tests.util.AuthHelper;
 import org.whispersystems.textsecuregcm.configuration.SmtpConfiguration;
 
@@ -32,6 +33,7 @@ public class AccountControllerTest {
   private RateLimiters           rateLimiters           = mock(RateLimiters.class          );
   private RateLimiter            rateLimiter            = mock(RateLimiter.class           );
   private SmsSender              smsSender              = mock(SmsSender.class             );
+  private StoredMessages         storedMessages         = mock(StoredMessages.class        );
   private SmtpConfiguration 	 smtp					= mock(SmtpConfiguration.class	   );
 
   @Rule
@@ -40,8 +42,9 @@ public class AccountControllerTest {
                                                             .addResource(new AccountController(pendingAccountsManager,
                                                                                                accountsManager,
                                                                                                rateLimiters,
-                                                                                               smsSender, 
-                                                                                               smtp))
+                                                                                               smsSender,
+                                                                                               smtp,
+                                                                                               storedMessages))
                                                             .build();
 
 

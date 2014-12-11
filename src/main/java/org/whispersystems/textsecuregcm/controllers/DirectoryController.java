@@ -64,7 +64,7 @@ public class DirectoryController {
     this.rateLimiters = rateLimiters;
   }
 
-  @Timed()
+  @Timed
   @GET
   @Path("/{token}")
   @Produces(MediaType.APPLICATION_JSON)
@@ -86,7 +86,7 @@ public class DirectoryController {
     }
   }
 
-  @Timed()
+  @Timed
   @PUT
   @Path("/tokens")
   @Produces(MediaType.APPLICATION_JSON)
@@ -95,6 +95,7 @@ public class DirectoryController {
       throws RateLimitExceededException
   {
     rateLimiters.getContactsLimiter().validate(account.getNumber(), contacts.getContacts().size());
+    contactsHistogram.update(contacts.getContacts().size());
 
     try {
       List<byte[]> tokens = new LinkedList<>();

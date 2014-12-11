@@ -36,9 +36,11 @@ import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.storage.PendingAccountsManager;
+import org.whispersystems.textsecuregcm.storage.StoredMessages;
 import org.whispersystems.textsecuregcm.util.Util;
 import org.whispersystems.textsecuregcm.util.VerificationCode;
 import org.whispersystems.textsecuregcm.configuration.SmtpConfiguration;
+import org.whispersystems.textsecuregcm.websocket.WebsocketAddress;
 
 import javax.validation.Valid;
 import javax.ws.rs.Consumes;
@@ -77,7 +79,7 @@ public class AccountController {
 	static final String EMAIL_INVITATION_BODY_TEXT = "To install Securecom messaging app, please check out out Android Playstore link at "+"https://play.google.com/store/apps/details?id=com.securecomcode.messaging&hl=en";
 	static final String EMAIL_INVITATION_SUBJECT_TEXT = "Securecom messaging Invitation from ";
 	static final String SMS_INVITATION_TEXT_PART1 = "You have received a Securecom messaging install invitation from your friend ";
-	static final String SMS_INVITATION_TEXT_PART2 = " , to join them in private and secure messaging, please install: "+"https://play.google.com/store/apps/details?id=com.securecomcode.messaging&hl=en";
+	static final String SMS_INVITATION_TEXT_PART2 = " to join them in private and secure messaging. Please install: "+"https://play.google.com/store/apps/details?id=com.securecomcode.messaging&hl=en";
 	static final String EMAIL_VERIFICATION_SUBJECT = "Securecom messaging Registration Verification Code";
 	static final String EMAIL_VERIFICATION_BODY_TEXT = "Your Securecom messaging verification code is:\t";
 
@@ -88,16 +90,19 @@ public class AccountController {
 	private final AccountsManager accounts;
 	private final RateLimiters rateLimiters;
 	private final SmsSender smsSender;
+    private final StoredMessages storedMessages;
 	private final SmtpConfiguration smtp;
 
 	public AccountController(PendingAccountsManager pendingAccounts,
 			AccountsManager accounts, RateLimiters rateLimiters,
-			SmsSender smsSenderFactory, SmtpConfiguration smtp) {
+			SmsSender smsSenderFactory, SmtpConfiguration smtp,
+                           StoredMessages storedMessages) {
 		this.pendingAccounts = pendingAccounts;
 		this.accounts = accounts;
 		this.rateLimiters = rateLimiters;
 		this.smsSender = smsSenderFactory;
 		this.smtp = smtp;
+        this.storedMessages  = storedMessages;
 	}
 
 	@Timed
@@ -191,7 +196,7 @@ public class AccountController {
 			account.addDevice(device);
 
 			accounts.create(account);
-
+            storedMessages.clear(new WebsocketAddress(number, Device.MASTER_ID));
 			pendingAccounts.remove(number);
 
 			logger.debug("Stored device...");

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.whispersystems.textsecuregcm.util.SystemMapper;
 import org.whispersystems.textsecuregcm.websocket.InvalidWebsocketAddressException;
 import org.whispersystems.textsecuregcm.websocket.WebsocketAddress;
 
@@ -17,10 +18,12 @@ import redis.clients.jedis.JedisPubSub;
 
 public class PubSubManager {
 
-  private final Logger                                logger       = LoggerFactory.getLogger(PubSubManager.class);
-  private final ObjectMapper                          mapper       = new ObjectMapper();
-  private final SubscriptionListener                  baseListener = new SubscriptionListener();
-  private final Map<WebsocketAddress, PubSubListener> listeners    = new HashMap<>();
+  private static final String KEEPALIVE_CHANNEL = "KEEPALIVE";
+
+  private final Logger                      logger       = LoggerFactory.getLogger(PubSubManager.class);
+  private final ObjectMapper                mapper       = SystemMapper.getMapper();
+  private final SubscriptionListener        baseListener = new SubscriptionListener();
+  private final Map<String, PubSubListener> listeners    = new HashMap<>();
 
   private final JedisPool jedisPool;
   private boolean subscribed = false;
@@ -32,25 +35,29 @@ public class PubSubManager {
   }
 
   public synchronized void subscribe(WebsocketAddress address, PubSubListener listener) {
-    listeners.put(address, listener);
-    baseListener.subscribe(address.toString());
+    listeners.put(address.serialize(), listener);
+    baseListener.subscribe(address.serialize());
   }
 
   public synchronized void unsubscribe(WebsocketAddress address, PubSubListener listener) {
-    if (listeners.get(address) == listener) {
-      listeners.remove(address);
-      baseListener.unsubscribe(address.toString());
+    if (listeners.get(address.serialize()) == listener) {
+      listeners.remove(address.serialize());
+      baseListener.unsubscribe(address.serialize());
     }
   }
 
   public synchronized boolean publish(WebsocketAddress address, PubSubMessage message) {
+    return publish(address.serialize(), message);
+  }
+
+  private synchronized boolean publish(String channel, PubSubMessage message) {
     try {
       String serialized = mapper.writeValueAsString(message);
       Jedis  jedis      = null;
 
       try {
         jedis = jedisPool.getResource();
-        return jedis.publish(address.toString(), serialized) != 0;
+        return jedis.publish(channel, serialized) != 0;
       } finally {
         if (jedis != null)
           jedisPool.returnResource(jedis);
@@ -78,7 +85,7 @@ public class PubSubManager {
           Jedis jedis = null;
           try {
             jedis = jedisPool.getResource();
-            jedis.subscribe(baseListener, new WebsocketAddress(0, 0).toString());
+            jedis.subscribe(baseListener, KEEPALIVE_CHANNEL);
             logger.warn("**** Unsubscribed from holding channel!!! ******");
           } finally {
             if (jedis != null)
@@ -94,7 +101,7 @@ public class PubSubManager {
         for (;;) {
           try {
             Thread.sleep(20000);
-            publish(new WebsocketAddress(0, 0), new PubSubMessage(0, "foo"));
+            publish(KEEPALIVE_CHANNEL, new PubSubMessage(0, "foo"));
           } catch (InterruptedException e) {
             throw new AssertionError(e);
           }
@@ -108,18 +115,15 @@ public class PubSubManager {
     @Override
     public void onMessage(String channel, String message) {
       try {
-        WebsocketAddress address = new WebsocketAddress(channel);
         PubSubListener   listener;
 
         synchronized (PubSubManager.this) {
-          listener = listeners.get(address);
+          listener = listeners.get(channel);
         }
 
         if (listener != null) {
           listener.onPubSubMessage(mapper.readValue(message, PubSubMessage.class));
         }
-      } catch (InvalidWebsocketAddressException e) {
-        logger.warn("Address", e);
       } catch (IOException e) {
         logger.warn("IOE", e);
       }
@@ -132,17 +136,11 @@ public class PubSubManager {
 
     @Override
     public void onSubscribe(String channel, int count) {
-      try {
-        WebsocketAddress address = new WebsocketAddress(channel);
-
-        if (address.getAccountId() == 0 && address.getDeviceId() == 0) {
-          synchronized (PubSubManager.this) {
-            subscribed = true;
-            PubSubManager.this.notifyAll();
-          }
+      if (KEEPALIVE_CHANNEL.equals(channel)) {
+        synchronized (PubSubManager.this) {
+          subscribed = true;
+          PubSubManager.this.notifyAll();
         }
-      } catch (InvalidWebsocketAddressException e) {
-        logger.warn("Weird address", e);
       }
     }
 
